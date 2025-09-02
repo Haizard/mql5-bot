@@ -4,6 +4,15 @@
 
 This guide provides detailed instructions on how to implement the Consolidated Trading System, a comprehensive multi-strategy trading bot for MetaTrader 5. The system integrates several advanced trading strategies and risk management techniques to create a robust trading solution.
 
+## IMPORTANT: Single File Approach
+
+**This trading system must be implemented as a single file solution.** All components, strategies, and functionality should be contained within the `ConsolidatedTradingSystem_SingleFile.mq5` file. This approach offers several advantages:
+
+- Simplified deployment and installation
+- Easier maintenance and updates
+- No dependency issues between multiple files
+- Improved portability across different MT5 installations
+
 ## Features
 
 The Consolidated Trading System includes the following key features:
@@ -27,16 +36,11 @@ The Consolidated Trading System includes the following key features:
 
 ## Implementation Steps
 
-### Step 1: Set Up Project Structure
+### Step 1: Single File Implementation
 
-Create the following files in your MetaTrader 5 project directory:
+All functionality should be implemented in a single file: `ConsolidatedTradingSystem_SingleFile.mq5`
 
-1. `TradeHistoryTracker.mqh` - For tracking trade history and performance
-2. `PositionSizeCalculator.mqh` - For position sizing calculations
-3. `ChandelierExit.mqh` - For trailing stop management
-4. `EnhancedPinBar.mqh` - For Pin Bar strategy implementation
-5. `EnhancedFVG.mqh` - For Fair Value Gap strategy implementation
-6. `ConsolidatedTradingSystem.mq5` - Main expert advisor file
+This file should include all necessary classes and functions for:
 
 ### Step 2: Implement Trade History Tracker
 
