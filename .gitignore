@@ -1,0 +1,42 @@
+# MetaTrader 5 specific files
+*.ex5
+*.ex4
+*.dll
+*.mqh.gch
+
+# Compiled files
+*.o
+*.obj
+
+# Log files
+*.log
+
+# MetaTrader generated files
+**/MQL5/Files/*
+**/MQL5/Logs/*
+**/MQL5/Experts/Advisors/
+**/MQL5/Experts/Indicators/
+**/MQL5/Experts/Scripts/
+
+# Temporary files
+*.swp
+*.swo
+*~
+
+# IDE specific files
+.vscode/
+.idea/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# CSV and data files (optional, uncomment if needed)
+# *.csv
+# *.dat
+
+# Backup files
+*.bak
+
+# Custom files to ignore
+trade_history.csv
