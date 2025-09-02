@@ -1004,6 +1004,1107 @@ struct FVGInfo {
     double   significance;   // Statistical significance score
 };
 
+//+------------------------------------------------------------------+
+//| VWAP (Volume-Weighted Average Price) Class                       |
+//+------------------------------------------------------------------+
+// Structure to store VWAP information
+struct VWAPInfo {
+    datetime time;           // Time of calculation
+    double   vwap;           // VWAP value
+    double   upper_band;     // Upper band (VWAP + deviation)
+    double   lower_band;     // Lower band (VWAP - deviation)
+    double   z_score;        // Z-score (price deviation from VWAP)
+    double   volume_ratio;   // Current volume / average volume ratio
+};
+
+class CVWAP {
+private:
+    string m_symbol;                // Symbol
+    ENUM_TIMEFRAMES m_timeframe;    // Timeframe
+    int    m_period;                // VWAP calculation period
+    double m_deviation_multiplier;  // Standard deviation multiplier for bands
+    bool   m_use_standard_session;  // Use standard session hours only
+    int    m_session_start_hour;    // Session start hour (for standard session)
+    int    m_session_end_hour;      // Session end hour (for standard session)
+    bool   m_reset_daily;           // Reset VWAP calculation daily
+    datetime m_last_reset_time;     // Last reset time
+    
+    // Arrays for calculation
+    double m_price_volume_sum;      // Sum of price * volume
+    double m_volume_sum;            // Sum of volume
+    double m_vwap_values[];         // Array of VWAP values
+    double m_squared_deviations[];  // Squared deviations for band calculation
+    
+    // Reset VWAP calculation
+    void ResetCalculation() {
+        m_price_volume_sum = 0;
+        m_volume_sum = 0;
+        ArrayFree(m_vwap_values);
+        ArrayFree(m_squared_deviations);
+        m_last_reset_time = TimeCurrent();
+    }
+    
+    // Check if VWAP should be reset (new day)
+    bool ShouldResetVWAP() {
+        if(!m_reset_daily) return false;
+        
+        datetime current_time = TimeCurrent();
+        MqlDateTime current_time_struct, last_reset_struct;
+        
+        TimeToStruct(current_time, current_time_struct);
+        TimeToStruct(m_last_reset_time, last_reset_struct);
+        
+        // Reset if day has changed
+        return (current_time_struct.day != last_reset_struct.day);
+    }
+    
+    // Check if current time is within session hours
+    bool IsWithinSessionHours() {
+        if(!m_use_standard_session) return true;
+        
+        MqlDateTime time_struct;
+        TimeToStruct(TimeCurrent(), time_struct);
+        
+        int current_hour = time_struct.hour;
+        return (current_hour >= m_session_start_hour && current_hour < m_session_end_hour);
+    }
+    
+public:
+    // Constructor
+    CVWAP() {
+        m_symbol = _Symbol;
+        m_timeframe = PERIOD_CURRENT;
+        m_period = 20;
+        m_deviation_multiplier = 2.0;
+        m_use_standard_session = false;
+        m_session_start_hour = 9;  // Default: 9 AM
+        m_session_end_hour = 16;   // Default: 4 PM
+        m_reset_daily = true;
+        m_last_reset_time = 0;
+        m_price_volume_sum = 0;
+        m_volume_sum = 0;
+    }
+    
+    // Initialize with parameters
+    void Initialize(string symbol, ENUM_TIMEFRAMES timeframe, int period = 20, double deviation = 2.0, bool reset_daily = true) {
+        m_symbol = symbol;
+        m_timeframe = timeframe;
+        m_period = period;
+        m_deviation_multiplier = deviation;
+        m_reset_daily = reset_daily;
+        
+        // Reset calculation
+        ResetCalculation();
+    }
+    
+    // Set session hours
+    void SetSessionHours(bool use_session, int start_hour = 9, int end_hour = 16) {
+        m_use_standard_session = use_session;
+        m_session_start_hour = start_hour;
+        m_session_end_hour = end_hour;
+    }
+    
+    // Calculate VWAP
+    void Calculate(VWAPInfo &info) {
+        // Check if VWAP should be reset
+        if(ShouldResetVWAP()) {
+            ResetCalculation();
+        }
+        
+        // Check if within session hours
+        if(!IsWithinSessionHours()) {
+            // Use last calculated VWAP if outside session hours
+            if(ArraySize(m_vwap_values) > 0) {
+                info.vwap = m_vwap_values[ArraySize(m_vwap_values) - 1];
+            }
+            return;
+        }
+        
+        // Get current bar data
+        double close = iClose(m_symbol, m_timeframe, 0);
+        double high = iHigh(m_symbol, m_timeframe, 0);
+        double low = iLow(m_symbol, m_timeframe, 0);
+        double volume = (double)iVolume(m_symbol, m_timeframe, 0);
+        
+        // Calculate typical price
+        double typical_price = (high + low + close) / 3.0;
+        
+        // Update sums
+        m_price_volume_sum += typical_price * volume;
+        m_volume_sum += volume;
+        
+        // Calculate VWAP
+        double vwap = (m_volume_sum > 0) ? m_price_volume_sum / m_volume_sum : close;
+        
+        // Store VWAP value
+        int size = ArraySize(m_vwap_values);
+        ArrayResize(m_vwap_values, size + 1);
+        m_vwap_values[size] = vwap;
+        
+        // Calculate squared deviation
+        double squared_dev = MathPow(close - vwap, 2);
+        ArrayResize(m_squared_deviations, size + 1);
+        m_squared_deviations[size] = squared_dev;
+        
+        // Calculate standard deviation
+        double sum_squared_dev = 0;
+        for(int i = MathMax(0, size - m_period + 1); i <= size; i++) {
+            sum_squared_dev += m_squared_deviations[i];
+        }
+        
+        int count = MathMin(m_period, size + 1);
+        double std_dev = (count > 1) ? MathSqrt(sum_squared_dev / count) : 0;
+        
+        // Calculate bands
+        double upper_band = vwap + (std_dev * m_deviation_multiplier);
+        double lower_band = vwap - (std_dev * m_deviation_multiplier);
+        
+        // Calculate Z-score
+        double z_score = (std_dev > 0) ? (close - vwap) / std_dev : 0;
+        
+        // Calculate volume ratio
+        double avg_volume = 0;
+        int vol_count = 0;
+        for(int i = 1; i <= m_period; i++) {
+            double vol = (double)iVolume(m_symbol, m_timeframe, i);
+            if(vol > 0) {
+                avg_volume += vol;
+                vol_count++;
+            }
+        }
+        double volume_ratio = (vol_count > 0 && avg_volume > 0) ? volume / (avg_volume / vol_count) : 1.0;
+        
+        // Fill info structure
+        info.time = TimeCurrent();
+        info.vwap = vwap;
+        info.upper_band = upper_band;
+        info.lower_band = lower_band;
+        info.z_score = z_score;
+        info.volume_ratio = volume_ratio;
+    }
+    
+    // Check for VWAP signal (returns 1 for bullish, -1 for bearish, 0 for none)
+    int CheckForSignal(double &signal_strength) {
+        VWAPInfo info;
+        Calculate(info);
+        
+        // Get current price
+        double close = iClose(m_symbol, m_timeframe, 0);
+        
+        // Initialize signal
+        int signal = 0;
+        signal_strength = 0;
+        
+        // Calculate signal based on price relative to VWAP and bands
+        if(close < info.lower_band) {
+            // Price below lower band - potential bullish signal (oversold)
+            signal = 1;
+            // Signal strength based on Z-score (more negative = stronger bullish signal)
+            signal_strength = MathMin(100, MathAbs(info.z_score) * 25);
+            
+            // Adjust strength based on volume
+            if(info.volume_ratio > 1.5) {
+                signal_strength *= 1.2; // Higher volume increases confidence
+            }
+        }
+        else if(close > info.upper_band) {
+            // Price above upper band - potential bearish signal (overbought)
+            signal = -1;
+            // Signal strength based on Z-score (more positive = stronger bearish signal)
+            signal_strength = MathMin(100, MathAbs(info.z_score) * 25);
+            
+            // Adjust strength based on volume
+            if(info.volume_ratio > 1.5) {
+                signal_strength *= 1.2; // Higher volume increases confidence
+            }
+        }
+        else if(MathAbs(close - info.vwap) < (info.upper_band - info.vwap) * 0.2) {
+            // Price near VWAP - potential reversal signal based on crossing
+            double prev_close = iClose(m_symbol, m_timeframe, 1);
+            
+            if(prev_close < info.vwap && close > info.vwap) {
+                // Crossed above VWAP - bullish
+                signal = 1;
+                signal_strength = 50 + (info.volume_ratio * 10); // Base strength + volume factor
+            }
+            else if(prev_close > info.vwap && close < info.vwap) {
+                // Crossed below VWAP - bearish
+                signal = -1;
+                signal_strength = 50 + (info.volume_ratio * 10); // Base strength + volume factor
+            }
+        }
+        
+        // Cap signal strength at 100
+        signal_strength = MathMin(100, signal_strength);
+        
+        return signal;
+    }
+    
+    // Calculate stop loss level for a VWAP signal
+    double CalculateStopLoss(int direction) {
+        VWAPInfo info;
+        Calculate(info);
+        
+        if(direction > 0) { // Bullish
+            // Use lower band or recent low, whichever is lower
+            double recent_low = iLow(m_symbol, m_timeframe, iLowest(m_symbol, m_timeframe, MODE_LOW, 5, 1));
+            return MathMin(info.lower_band * 0.99, recent_low * 0.99); // 1% buffer
+        }
+        else if(direction < 0) { // Bearish
+            // Use upper band or recent high, whichever is higher
+            double recent_high = iHigh(m_symbol, m_timeframe, iHighest(m_symbol, m_timeframe, MODE_HIGH, 5, 1));
+            return MathMax(info.upper_band * 1.01, recent_high * 1.01); // 1% buffer
+        }
+        
+        return 0;
+    }
+    
+    // Get current VWAP value
+    double GetVWAP() {
+        VWAPInfo info;
+        Calculate(info);
+        return info.vwap;
+    }
+    
+    // Get VWAP bands
+    void GetVWAPBands(double &vwap, double &upper, double &lower) {
+        VWAPInfo info;
+        Calculate(info);
+        vwap = info.vwap;
+        upper = info.upper_band;
+        lower = info.lower_band;
+    }
+};
+
+//+------------------------------------------------------------------+
+//| Smart Money Concepts (SMC) Class                                 |
+//+------------------------------------------------------------------+
+// Structure to store Order Block information
+struct OrderBlockInfo {
+    datetime time;           // Time of the order block formation
+    double   high;           // High price of the order block
+    double   low;            // Low price of the order block
+    double   open;           // Open price of the order block
+    double   close;          // Close price of the order block
+    bool     is_bullish;     // True if bullish order block
+    bool     is_bearish;     // True if bearish order block
+    bool     is_tested;      // True if the order block has been tested
+    int      age;            // Age of the order block in bars
+    double   strength;       // Strength score of the order block
+};
+
+// Structure to store Liquidity Zone information
+struct LiquidityZoneInfo {
+    datetime time;           // Time of the liquidity zone formation
+    double   upper_level;    // Upper price level of the zone
+    double   lower_level;    // Lower price level of the zone
+    bool     is_buy_side;    // True if buy-side liquidity (below price)
+    bool     is_sell_side;   // True if sell-side liquidity (above price)
+    bool     is_swept;       // True if the liquidity has been swept
+    int      age;            // Age of the liquidity zone in bars
+    double   strength;       // Strength score of the liquidity zone
+};
+
+class CSmartMoneyConcepts {
+private:
+    string m_symbol;                // Symbol
+    ENUM_TIMEFRAMES m_timeframe;    // Timeframe
+    int    m_lookback_period;       // Lookback period for detection
+    int    m_max_age;               // Maximum age to consider
+    bool   m_use_multi_timeframe;   // Use multiple timeframes for analysis
+    ENUM_TIMEFRAMES m_higher_tf;    // Higher timeframe for context
+    
+    // Arrays to store detected structures
+    OrderBlockInfo m_order_blocks[];       // Array of order blocks
+    LiquidityZoneInfo m_liquidity_zones[]; // Array of liquidity zones
+    FVGInfo m_fair_value_gaps[];           // Array of fair value gaps
+    
+    // Detect order blocks
+    bool DetectOrderBlock(int start_index, OrderBlockInfo &ob) {
+        // Need at least 3 bars
+        if(start_index + 2 >= Bars(m_symbol, m_timeframe)) return false;
+        
+        // Get bar data
+        double open1 = iOpen(m_symbol, m_timeframe, start_index);
+        double high1 = iHigh(m_symbol, m_timeframe, start_index);
+        double low1 = iLow(m_symbol, m_timeframe, start_index);
+        double close1 = iClose(m_symbol, m_timeframe, start_index);
+        
+        double open2 = iOpen(m_symbol, m_timeframe, start_index + 1);
+        double high2 = iHigh(m_symbol, m_timeframe, start_index + 1);
+        double low2 = iLow(m_symbol, m_timeframe, start_index + 1);
+        double close2 = iClose(m_symbol, m_timeframe, start_index + 1);
+        
+        double open3 = iOpen(m_symbol, m_timeframe, start_index + 2);
+        double high3 = iHigh(m_symbol, m_timeframe, start_index + 2);
+        double low3 = iLow(m_symbol, m_timeframe, start_index + 2);
+        double close3 = iClose(m_symbol, m_timeframe, start_index + 2);
+        
+        // Calculate candle ranges
+        double range1 = high1 - low1;
+        double range2 = high2 - low2;
+        double range3 = high3 - low3;
+        
+        // Calculate body sizes
+        double body1 = MathAbs(open1 - close1);
+        double body2 = MathAbs(open2 - close2);
+        double body3 = MathAbs(open3 - close3);
+        
+        // Check for bullish order block (last candle before a strong bearish move)
+        bool is_bullish_ob = false;
+        if(close1 < open1 && body1 > 0.5 * range1 && // Strong bearish candle
+           close2 > open2 && body2 > 0.3 * range2 && // Bullish candle before it
+           close3 < open3) {                         // Bearish confirmation
+            is_bullish_ob = true;
+        }
+        
+        // Check for bearish order block (last candle before a strong bullish move)
+        bool is_bearish_ob = false;
+        if(close1 > open1 && body1 > 0.5 * range1 && // Strong bullish candle
+           close2 < open2 && body2 > 0.3 * range2 && // Bearish candle before it
+           close3 > open3) {                         // Bullish confirmation
+            is_bearish_ob = true;
+        }
+        
+        // If order block detected, fill the info
+        if(is_bullish_ob || is_bearish_ob) {
+            ob.time = iTime(m_symbol, m_timeframe, start_index + 1);
+            ob.high = high2;
+            ob.low = low2;
+            ob.open = open2;
+            ob.close = close2;
+            ob.is_bullish = is_bullish_ob;
+            ob.is_bearish = is_bearish_ob;
+            ob.is_tested = false;
+            ob.age = start_index + 1;
+            
+            // Calculate strength based on body size and subsequent momentum
+            double momentum = body1 / range1;
+            double ob_quality = body2 / range2;
+            ob.strength = 50 + (momentum * 25) + (ob_quality * 25);
+            ob.strength = MathMin(100, ob.strength);
+            
+            return true;
+        }
+        
+        return false;
+    }
+    
+    // Detect liquidity zones
+    bool DetectLiquidityZone(int start_index, LiquidityZoneInfo &lz) {
+        // Need at least 5 bars
+        if(start_index + 5 >= Bars(m_symbol, m_timeframe)) return false;
+        
+        // Find swing high/low patterns
+        bool is_swing_high = true;
+        bool is_swing_low = true;
+        double swing_high = 0;
+        double swing_low = 0;
+        int swing_high_index = -1;
+        int swing_low_index = -1;
+        
+        // Check for swing high (higher high with lower highs on both sides)
+        for(int i = start_index + 1; i < start_index + 5; i++) {
+            double high = iHigh(m_symbol, m_timeframe, i);
+            if(high > swing_high || swing_high_index < 0) {
+                swing_high = high;
+                swing_high_index = i;
+            }
+        }
+        
+        // Verify swing high pattern
+        for(int i = start_index; i < start_index + 5; i++) {
+            if(i != swing_high_index && iHigh(m_symbol, m_timeframe, i) >= swing_high) {
+                is_swing_high = false;
+                break;
+            }
+        }
+        
+        // Check for swing low (lower low with higher lows on both sides)
+        for(int i = start_index + 1; i < start_index + 5; i++) {
+            double low = iLow(m_symbol, m_timeframe, i);
+            if(low < swing_low || swing_low_index < 0) {
+                swing_low = low;
+                swing_low_index = i;
+            }
+        }
+        
+        // Verify swing low pattern
+        for(int i = start_index; i < start_index + 5; i++) {
+            if(i != swing_low_index && iLow(m_symbol, m_timeframe, i) <= swing_low) {
+                is_swing_low = false;
+                break;
+            }
+        }
+        
+        // If swing high/low detected, create liquidity zone
+        if(is_swing_high) {
+            lz.time = iTime(m_symbol, m_timeframe, swing_high_index);
+            lz.upper_level = swing_high + (10 * _Point); // Add buffer
+            lz.lower_level = swing_high - (5 * _Point);  // Small buffer below
+            lz.is_buy_side = false;
+            lz.is_sell_side = true;
+            lz.is_swept = false;
+            lz.age = swing_high_index;
+            
+            // Calculate strength based on number of touches and volume
+            int touches = 0;
+            double max_volume = 0;
+            for(int i = start_index; i < start_index + 10; i++) {
+                if(i >= Bars(m_symbol, m_timeframe)) break;
+                
+                double high = iHigh(m_symbol, m_timeframe, i);
+                if(MathAbs(high - swing_high) < 10 * _Point) {
+                    touches++;
+                }
+                
+                double volume = (double)iVolume(m_symbol, m_timeframe, i);
+                if(volume > max_volume) {
+                    max_volume = volume;
+                }
+            }
+            
+            // Strength based on touches and relative volume
+            lz.strength = 50 + (touches * 10);
+            
+            // Adjust by volume if significant
+            double avg_volume = 0;
+            int vol_count = 0;
+            for(int i = start_index; i < start_index + 20; i++) {
+                if(i >= Bars(m_symbol, m_timeframe)) break;
+                avg_volume += (double)iVolume(m_symbol, m_timeframe, i);
+                vol_count++;
+            }
+            
+            if(vol_count > 0) {
+                avg_volume /= vol_count;
+                if(max_volume > avg_volume * 1.5) {
+                    lz.strength *= 1.2; // Boost if high volume
+                }
+            }
+            
+            lz.strength = MathMin(100, lz.strength);
+            return true;
+        }
+        else if(is_swing_low) {
+            lz.time = iTime(m_symbol, m_timeframe, swing_low_index);
+            lz.upper_level = swing_low + (5 * _Point);  // Small buffer above
+            lz.lower_level = swing_low - (10 * _Point); // Add buffer
+            lz.is_buy_side = true;
+            lz.is_sell_side = false;
+            lz.is_swept = false;
+            lz.age = swing_low_index;
+            
+            // Calculate strength based on number of touches and volume
+            int touches = 0;
+            double max_volume = 0;
+            for(int i = start_index; i < start_index + 10; i++) {
+                if(i >= Bars(m_symbol, m_timeframe)) break;
+                
+                double low = iLow(m_symbol, m_timeframe, i);
+                if(MathAbs(low - swing_low) < 10 * _Point) {
+                    touches++;
+                }
+                
+                double volume = (double)iVolume(m_symbol, m_timeframe, i);
+                if(volume > max_volume) {
+                    max_volume = volume;
+                }
+            }
+            
+            // Strength based on touches and relative volume
+            lz.strength = 50 + (touches * 10);
+            
+            // Adjust by volume if significant
+            double avg_volume = 0;
+            int vol_count = 0;
+            for(int i = start_index; i < start_index + 20; i++) {
+                if(i >= Bars(m_symbol, m_timeframe)) break;
+                avg_volume += (double)iVolume(m_symbol, m_timeframe, i);
+                vol_count++;
+            }
+            
+            if(vol_count > 0) {
+                avg_volume /= vol_count;
+                if(max_volume > avg_volume * 1.5) {
+                    lz.strength *= 1.2; // Boost if high volume
+                }
+            }
+            
+            lz.strength = MathMin(100, lz.strength);
+            return true;
+        }
+        
+        return false;
+    }
+    
+    // Detect fair value gaps (using the existing FVG detection logic)
+    bool DetectFVG(int start_index, FVGInfo &fvg, bool bullish) {
+        // Need at least 3 bars
+        if(start_index + 2 >= Bars(m_symbol, m_timeframe)) return false;
+        
+        // Get bar data
+        double high1 = iHigh(m_symbol, m_timeframe, start_index);
+        double low1 = iLow(m_symbol, m_timeframe, start_index);
+        double high2 = iHigh(m_symbol, m_timeframe, start_index + 1);
+        double low2 = iLow(m_symbol, m_timeframe, start_index + 1);
+        double high3 = iHigh(m_symbol, m_timeframe, start_index + 2);
+        double low3 = iLow(m_symbol, m_timeframe, start_index + 2);
+        
+        if(bullish) {
+            // Check for bullish FVG (low of first bar > high of third bar)
+            if(low1 > high3) {
+                // Calculate gap size
+                double gap_size = low1 - high3;
+                
+                // Fill FVG info
+                fvg.time = iTime(m_symbol, m_timeframe, start_index + 1);
+                fvg.gap_high = low1;
+                fvg.gap_low = high3;
+                fvg.gap_size = gap_size;
+                fvg.gap_mid = high3 + (gap_size / 2);
+                fvg.is_bullish = true;
+                fvg.is_bearish = false;
+                fvg.is_filled = false;
+                fvg.age = start_index + 1;
+                
+                // Calculate significance based on gap size relative to ATR
+                int atr_handle = iATR(m_symbol, m_timeframe, 14);
+                double atr_buffer[];
+                ArrayResize(atr_buffer, 1);
+                if(CopyBuffer(atr_handle, 0, 0, 1, atr_buffer) > 0) {
+                    double atr = atr_buffer[0];
+                    if(atr > 0) {
+                        fvg.significance = 100 * (gap_size / atr) / 2; // Simple score based on ATR
+                        fvg.significance = MathMin(100, fvg.significance);
+                    }
+                    else {
+                        fvg.significance = 50; // Default if ATR calculation fails
+                    }
+                }
+                else {
+                    fvg.significance = 50; // Default if ATR calculation fails
+                }
+                
+                return true;
+            }
+        }
+        else {
+            // Check for bearish FVG (high of first bar < low of third bar)
+            if(high1 < low3) {
+                // Calculate gap size
+                double gap_size = low3 - high1;
+                
+                // Fill FVG info
+                fvg.time = iTime(m_symbol, m_timeframe, start_index + 1);
+                fvg.gap_high = low3;
+                fvg.gap_low = high1;
+                fvg.gap_size = gap_size;
+                fvg.gap_mid = high1 + (gap_size / 2);
+                fvg.is_bullish = false;
+                fvg.is_bearish = true;
+                fvg.is_filled = false;
+                fvg.age = start_index + 1;
+                
+                // Calculate significance based on gap size relative to ATR
+                int atr_handle = iATR(m_symbol, m_timeframe, 14);
+                double atr_buffer[];
+                ArrayResize(atr_buffer, 1);
+                if(CopyBuffer(atr_handle, 0, 0, 1, atr_buffer) > 0) {
+                    double atr = atr_buffer[0];
+                    if(atr > 0) {
+                        fvg.significance = 100 * (gap_size / atr) / 2; // Simple score based on ATR
+                        fvg.significance = MathMin(100, fvg.significance);
+                    }
+                    else {
+                        fvg.significance = 50; // Default if ATR calculation fails
+                    }
+                }
+                else {
+                    fvg.significance = 50; // Default if ATR calculation fails
+                }
+                
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    // Update status of order blocks (check if tested)
+    void UpdateOrderBlockStatus(OrderBlockInfo &ob) {
+        // Skip if already tested
+        if(ob.is_tested) return;
+        
+        // Check if price has tested the order block
+        for(int i = 0; i < ob.age; i++) {
+            double high = iHigh(m_symbol, m_timeframe, i);
+            double low = iLow(m_symbol, m_timeframe, i);
+            
+            if(ob.is_bullish) {
+                // Bullish order block is tested if price trades into it from above
+                if(low <= ob.high && high >= ob.high) {
+                    ob.is_tested = true;
+                    return;
+                }
+            }
+            else if(ob.is_bearish) {
+                // Bearish order block is tested if price trades into it from below
+                if(high >= ob.low && low <= ob.low) {
+                    ob.is_tested = true;
+                    return;
+                }
+            }
+        }
+    }
+    
+    // Update status of liquidity zones (check if swept)
+    void UpdateLiquidityZoneStatus(LiquidityZoneInfo &lz) {
+        // Skip if already swept
+        if(lz.is_swept) return;
+        
+        // Check if price has swept the liquidity zone
+        for(int i = 0; i < lz.age; i++) {
+            double high = iHigh(m_symbol, m_timeframe, i);
+            double low = iLow(m_symbol, m_timeframe, i);
+            
+            if(lz.is_buy_side) {
+                // Buy-side liquidity is swept if price trades below the lower level
+                if(low < lz.lower_level) {
+                    lz.is_swept = true;
+                    return;
+                }
+            }
+            else if(lz.is_sell_side) {
+                // Sell-side liquidity is swept if price trades above the upper level
+                if(high > lz.upper_level) {
+                    lz.is_swept = true;
+                    return;
+                }
+            }
+        }
+    }
+    
+public:
+    // Constructor
+    CSmartMoneyConcepts() {
+        m_symbol = _Symbol;
+        m_timeframe = PERIOD_CURRENT;
+        m_lookback_period = 100;
+        m_max_age = 50;
+        m_use_multi_timeframe = false;
+        m_higher_tf = PERIOD_H4; // Default higher timeframe
+    }
+    
+    // Initialize with parameters
+    void Initialize(string symbol, ENUM_TIMEFRAMES timeframe, int lookback = 100, int max_age = 50) {
+        m_symbol = symbol;
+        m_timeframe = timeframe;
+        m_lookback_period = lookback;
+        m_max_age = max_age;
+        
+        // Scan for historical structures
+        ScanHistoricalStructures();
+    }
+    
+    // Set multi-timeframe analysis
+    void SetMultiTimeframe(bool use_multi_tf, ENUM_TIMEFRAMES higher_tf = PERIOD_H4) {
+        m_use_multi_timeframe = use_multi_tf;
+        m_higher_tf = higher_tf;
+    }
+    
+    // Scan for historical structures
+    void ScanHistoricalStructures() {
+        // Clear existing structures
+        ArrayFree(m_order_blocks);
+        ArrayFree(m_liquidity_zones);
+        ArrayFree(m_fair_value_gaps);
+        
+        // Scan for order blocks
+        for(int i = 0; i < m_lookback_period; i++) {
+            OrderBlockInfo ob;
+            if(DetectOrderBlock(i, ob)) {
+                // Update status
+                UpdateOrderBlockStatus(ob);
+                
+                // Add to array if within age limit
+                if(ob.age <= m_max_age) {
+                    int size = ArraySize(m_order_blocks);
+                    ArrayResize(m_order_blocks, size + 1);
+                    m_order_blocks[size] = ob;
+                }
+            }
+        }
+        
+        // Scan for liquidity zones
+        for(int i = 0; i < m_lookback_period; i++) {
+            LiquidityZoneInfo lz;
+            if(DetectLiquidityZone(i, lz)) {
+                // Update status
+                UpdateLiquidityZoneStatus(lz);
+                
+                // Add to array if within age limit
+                if(lz.age <= m_max_age) {
+                    int size = ArraySize(m_liquidity_zones);
+                    ArrayResize(m_liquidity_zones, size + 1);
+                    m_liquidity_zones[size] = lz;
+                }
+            }
+        }
+        
+        // Scan for fair value gaps
+        for(int i = 0; i < m_lookback_period; i++) {
+            FVGInfo fvg;
+            
+            // Check for bullish FVG
+            if(DetectFVG(i, fvg, true)) {
+                // Add to array if within age limit
+                if(fvg.age <= m_max_age) {
+                    int size = ArraySize(m_fair_value_gaps);
+                    ArrayResize(m_fair_value_gaps, size + 1);
+                    m_fair_value_gaps[size] = fvg;
+                }
+            }
+            
+            // Check for bearish FVG
+            if(DetectFVG(i, fvg, false)) {
+                // Add to array if within age limit
+                if(fvg.age <= m_max_age) {
+                    int size = ArraySize(m_fair_value_gaps);
+                    ArrayResize(m_fair_value_gaps, size + 1);
+                    m_fair_value_gaps[size] = fvg;
+                }
+            }
+        }
+    }
+    
+    // Update all structures
+    void Update() {
+        // Check for new structures
+        OrderBlockInfo new_ob;
+        LiquidityZoneInfo new_lz;
+        FVGInfo new_fvg;
+        
+        // Check for new order block
+        if(DetectOrderBlock(0, new_ob)) {
+            int size = ArraySize(m_order_blocks);
+            ArrayResize(m_order_blocks, size + 1);
+            m_order_blocks[size] = new_ob;
+        }
+        
+        // Check for new liquidity zone
+        if(DetectLiquidityZone(0, new_lz)) {
+            int size = ArraySize(m_liquidity_zones);
+            ArrayResize(m_liquidity_zones, size + 1);
+            m_liquidity_zones[size] = new_lz;
+        }
+        
+        // Check for new FVGs
+        if(DetectFVG(0, new_fvg, true) || DetectFVG(0, new_fvg, false)) {
+            int size = ArraySize(m_fair_value_gaps);
+            ArrayResize(m_fair_value_gaps, size + 1);
+            m_fair_value_gaps[size] = new_fvg;
+        }
+        
+        // Update status of existing structures
+        for(int i = 0; i < ArraySize(m_order_blocks); i++) {
+            // Update age
+            m_order_blocks[i].age++;
+            
+            // Check if tested
+            UpdateOrderBlockStatus(m_order_blocks[i]);
+            
+            // Remove if too old
+            if(m_order_blocks[i].age > m_max_age) {
+                // Remove from array
+                for(int j = i; j < ArraySize(m_order_blocks) - 1; j++) {
+                    m_order_blocks[j] = m_order_blocks[j+1];
+                }
+                ArrayResize(m_order_blocks, ArraySize(m_order_blocks) - 1);
+                i--; // Adjust index after removal
+            }
+        }
+        
+        // Update liquidity zones
+        for(int i = 0; i < ArraySize(m_liquidity_zones); i++) {
+            // Update age
+            m_liquidity_zones[i].age++;
+            
+            // Check if swept
+            UpdateLiquidityZoneStatus(m_liquidity_zones[i]);
+            
+            // Remove if too old or swept
+            if(m_liquidity_zones[i].age > m_max_age || m_liquidity_zones[i].is_swept) {
+                // Remove from array
+                for(int j = i; j < ArraySize(m_liquidity_zones) - 1; j++) {
+                    m_liquidity_zones[j] = m_liquidity_zones[j+1];
+                }
+                ArrayResize(m_liquidity_zones, ArraySize(m_liquidity_zones) - 1);
+                i--; // Adjust index after removal
+            }
+        }
+        
+        // Update FVGs (using existing FVG update logic)
+        for(int i = 0; i < ArraySize(m_fair_value_gaps); i++) {
+            // Update age
+            m_fair_value_gaps[i].age++;
+            
+            // Check if filled
+            bool is_filled = false;
+            for(int j = 0; j < m_fair_value_gaps[i].age; j++) {
+                double high = iHigh(m_symbol, m_timeframe, j);
+                double low = iLow(m_symbol, m_timeframe, j);
+                
+                if(m_fair_value_gaps[i].is_bullish) {
+                    // Bullish FVG is filled if price trades below the gap high
+                    if(high >= m_fair_value_gaps[i].gap_high && low <= m_fair_value_gaps[i].gap_high) {
+                        is_filled = true;
+                        break;
+                    }
+                }
+                else if(m_fair_value_gaps[i].is_bearish) {
+                    // Bearish FVG is filled if price trades above the gap low
+                    if(high >= m_fair_value_gaps[i].gap_low && low <= m_fair_value_gaps[i].gap_low) {
+                        is_filled = true;
+                        break;
+                    }
+                }
+            }
+            
+            m_fair_value_gaps[i].is_filled = is_filled;
+            
+            // Remove if too old or filled
+            if(m_fair_value_gaps[i].age > m_max_age || m_fair_value_gaps[i].is_filled) {
+                // Remove from array
+                for(int j = i; j < ArraySize(m_fair_value_gaps) - 1; j++) {
+                    m_fair_value_gaps[j] = m_fair_value_gaps[j+1];
+                }
+                ArrayResize(m_fair_value_gaps, ArraySize(m_fair_value_gaps) - 1);
+                i--; // Adjust index after removal
+            }
+        }
+    }
+    
+    // Check for SMC signal (returns 1 for bullish, -1 for bearish, 0 for none)
+    int CheckForSignal(double &signal_strength) {
+        // Update structures
+        Update();
+        
+        // Initialize signal
+        int signal = 0;
+        signal_strength = 0;
+        
+        // Check for order block signals
+        for(int i = 0; i < ArraySize(m_order_blocks); i++) {
+            if(m_order_blocks[i].is_tested) continue; // Skip tested order blocks
+            
+            double current_price = iClose(m_symbol, m_timeframe, 0);
+            double prev_close = iClose(m_symbol, m_timeframe, 1);
+            
+            if(m_order_blocks[i].is_bullish) {
+                // Bullish order block - check if price is approaching from above
+                if(current_price < prev_close && 
+                   current_price > m_order_blocks[i].high && 
+                   prev_close > current_price && 
+                   current_price - m_order_blocks[i].high < 20 * _Point) {
+                    
+                    // Potential bullish signal
+                    if(m_order_blocks[i].strength > signal_strength) {
+                        signal = 1;
+                        signal_strength = m_order_blocks[i].strength;
+                    }
+                }
+            }
+            else if(m_order_blocks[i].is_bearish) {
+                // Bearish order block - check if price is approaching from below
+                if(current_price > prev_close && 
+                   current_price < m_order_blocks[i].low && 
+                   prev_close < current_price && 
+                   m_order_blocks[i].low - current_price < 20 * _Point) {
+                    
+                    // Potential bearish signal
+                    if(m_order_blocks[i].strength > signal_strength) {
+                        signal = -1;
+                        signal_strength = m_order_blocks[i].strength;
+                    }
+                }
+            }
+        }
+        
+        // Check for liquidity sweep signals
+        for(int i = 0; i < ArraySize(m_liquidity_zones); i++) {
+            if(m_liquidity_zones[i].is_swept) {
+                // Check if sweep just happened (within last 3 bars)
+                if(m_liquidity_zones[i].age <= 3) {
+                    double current_price = iClose(m_symbol, m_timeframe, 0);
+                    
+                    if(m_liquidity_zones[i].is_buy_side) {
+                        // Buy-side liquidity swept - potential bullish reversal
+                        if(current_price > iLow(m_symbol, m_timeframe, 0) + (10 * _Point)) {
+                            // Price bouncing after sweep - bullish
+                            if(m_liquidity_zones[i].strength > signal_strength) {
+                                signal = 1;
+                                signal_strength = m_liquidity_zones[i].strength;
+                            }
+                        }
+                    }
+                    else if(m_liquidity_zones[i].is_sell_side) {
+                        // Sell-side liquidity swept - potential bearish reversal
+                        if(current_price < iHigh(m_symbol, m_timeframe, 0) - (10 * _Point)) {
+                            // Price dropping after sweep - bearish
+                            if(m_liquidity_zones[i].strength > signal_strength) {
+                                signal = -1;
+                                signal_strength = m_liquidity_zones[i].strength;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check for FVG signals
+        for(int i = 0; i < ArraySize(m_fair_value_gaps); i++) {
+            if(m_fair_value_gaps[i].is_filled) continue; // Skip filled FVGs
+            
+            double current_price = iClose(m_symbol, m_timeframe, 0);
+            
+            if(m_fair_value_gaps[i].is_bullish) {
+                // Bullish FVG - check if price is approaching the gap from above
+                if(current_price < m_fair_value_gaps[i].gap_high && 
+                   current_price > m_fair_value_gaps[i].gap_low && 
+                   current_price - m_fair_value_gaps[i].gap_low < m_fair_value_gaps[i].gap_size * 0.3) {
+                    
+                    // Potential bullish signal near bottom of gap
+                    if(m_fair_value_gaps[i].significance > signal_strength) {
+                        signal = 1;
+                        signal_strength = m_fair_value_gaps[i].significance;
+                    }
+                }
+            }
+            else if(m_fair_value_gaps[i].is_bearish) {
+                // Bearish FVG - check if price is approaching the gap from below
+                if(current_price > m_fair_value_gaps[i].gap_low && 
+                   current_price < m_fair_value_gaps[i].gap_high && 
+                   m_fair_value_gaps[i].gap_high - current_price < m_fair_value_gaps[i].gap_size * 0.3) {
+                    
+                    // Potential bearish signal near top of gap
+                    if(m_fair_value_gaps[i].significance > signal_strength) {
+                        signal = -1;
+                        signal_strength = m_fair_value_gaps[i].significance;
+                    }
+                }
+            }
+        }
+        
+        // If using multi-timeframe analysis, check higher timeframe for context
+        if(m_use_multi_timeframe && signal != 0) {
+            // Check trend direction on higher timeframe
+            double higher_close = iClose(m_symbol, m_higher_tf, 0);
+            double higher_ma20 = 0;
+            
+            // Calculate 20-period MA on higher timeframe
+            int ma_handle = iMA(m_symbol, m_higher_tf, 20, 0, MODE_SMA, PRICE_CLOSE);
+            double ma_buffer[];
+            ArrayResize(ma_buffer, 1);
+            if(CopyBuffer(ma_handle, 0, 0, 1, ma_buffer) > 0) {
+                higher_ma20 = ma_buffer[0];
+                
+                // Check if signal aligns with higher timeframe trend
+                bool higher_tf_uptrend = (higher_close > higher_ma20);
+                
+                if((signal > 0 && higher_tf_uptrend) || (signal < 0 && !higher_tf_uptrend)) {
+                    // Signal aligns with higher timeframe trend - strengthen it
+                    signal_strength *= 1.2;
+                }
+                else {
+                    // Signal against higher timeframe trend - weaken it
+                    signal_strength *= 0.8;
+                }
+            }
+        }
+        
+        // Cap signal strength at 100
+        signal_strength = MathMin(100, signal_strength);
+        
+        return signal;
+    }
+    
+    // Calculate stop loss level for an SMC signal
+    double CalculateStopLoss(int direction) {
+        if(direction > 0) { // Bullish
+            // Find nearest untested bullish order block or unfilled bullish FVG
+            double stop_level = 0;
+            double min_distance = DBL_MAX;
+            
+            // Check order blocks
+            for(int i = 0; i < ArraySize(m_order_blocks); i++) {
+                if(m_order_blocks[i].is_bullish && !m_order_blocks[i].is_tested) {
+                    double distance = MathAbs(iClose(m_symbol, m_timeframe, 0) - m_order_blocks[i].low);
+                    if(distance < min_distance) {
+                        min_distance = distance;
+                        stop_level = m_order_blocks[i].low - (10 * _Point); // Below the order block
+                    }
+                }
+            }
+            
+            // Check FVGs
+            for(int i = 0; i < ArraySize(m_fair_value_gaps); i++) {
+                if(m_fair_value_gaps[i].is_bullish && !m_fair_value_gaps[i].is_filled) {
+                    double distance = MathAbs(iClose(m_symbol, m_timeframe, 0) - m_fair_value_gaps[i].gap_low);
+                    if(distance < min_distance) {
+                        min_distance = distance;
+                        stop_level = m_fair_value_gaps[i].gap_low - (10 * _Point); // Below the FVG
+                    }
+                }
+            }
+            
+            // If no suitable level found, use recent swing low
+            if(stop_level == 0) {
+                stop_level = iLow(m_symbol, m_timeframe, iLowest(m_symbol, m_timeframe, MODE_LOW, 10, 1)) - (10 * _Point);
+            }
+            
+            return stop_level;
+        }
+        else if(direction < 0) { // Bearish
+            // Find nearest untested bearish order block or unfilled bearish FVG
+            double stop_level = 0;
+            double min_distance = DBL_MAX;
+            
+            // Check order blocks
+            for(int i = 0; i < ArraySize(m_order_blocks); i++) {
+                if(m_order_blocks[i].is_bearish && !m_order_blocks[i].is_tested) {
+                    double distance = MathAbs(iClose(m_symbol, m_timeframe, 0) - m_order_blocks[i].high);
+                    if(distance < min_distance) {
+                        min_distance = distance;
+                        stop_level = m_order_blocks[i].high + (10 * _Point); // Above the order block
+                    }
+                }
+            }
+            
+            // Check FVGs
+            for(int i = 0; i < ArraySize(m_fair_value_gaps); i++) {
+                if(m_fair_value_gaps[i].is_bearish && !m_fair_value_gaps[i].is_filled) {
+                    double distance = MathAbs(iClose(m_symbol, m_timeframe, 0) - m_fair_value_gaps[i].gap_high);
+                    if(distance < min_distance) {
+                        min_distance = distance;
+                        stop_level = m_fair_value_gaps[i].gap_high + (10 * _Point); // Above the FVG
+                    }
+                }
+            }
+            
+            // If no suitable level found, use recent swing high
+            if(stop_level == 0) {
+                stop_level = iHigh(m_symbol, m_timeframe, iHighest(m_symbol, m_timeframe, MODE_HIGH, 10, 1)) + (10 * _Point);
+            }
+            
+            return stop_level;
+        }
+        
+        return 0;
+    }
+};
+
+
 class CEnhancedFVG {
 private:
     string m_symbol;                // Symbol
